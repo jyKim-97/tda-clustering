@@ -53,9 +53,11 @@ def parse_prefix():
 
 def compute_euclidean(prefix_set):
     for prefix in tqdm(prefix_set):
-        vert, surf = tt.load_data(os.path.join(FDIR, prefix))
+        vert, _ = tt.load_data(os.path.join(FDIR, prefix))
         dmat = tt.compute_euclidean(vert)
-        save_dmat(prefix, dmat)
+        # save_dmat(prefix, dmat)
+        fout = os.path.join(FDIR_OUT, prefix+".pkl") 
+        tt.save_distance(fout, {"name": prefix, "dm": dmat})
 
 
 def compute_geodesic(prefix_set):
@@ -64,7 +66,9 @@ def compute_geodesic(prefix_set):
         vert, surf = tt.load_data(os.path.join(FDIR, prefix))
         wgraph = tt.gen_wgraph(vert, surf)
         dmat = tt.compute_geodesic(wgraph)
-        save_dmat(prefix, dmat)
+        # save_dmat(prefix, dmat)
+        fout = os.path.join(FDIR_OUT, prefix+".pkl") 
+        tt.save_distance(fout, {"name": prefix, "dm": dmat})
         return 0
     
     
@@ -83,13 +87,13 @@ def compute_geodesic(prefix_set):
             p.join()
     
 
-def save_dmat(prefix, dmat):
-    fout = os.path.join(FDIR_OUT, prefix+".pkl") 
-    with open(fout, "wb") as fp:
-            pkl.dump({
-                "name": prefix,
-                "dm": dmat
-            }, fp)
+# def save_dmat(prefix, dmat):
+#     fout = os.path.join(FDIR_OUT, prefix+".pkl") 
+#     with open(fout, "wb") as fp:
+#             pkl.dump({
+#                 "name": prefix,
+#                 "dm": dmat
+#             }, fp)
 
     
 if __name__ == "__main__":

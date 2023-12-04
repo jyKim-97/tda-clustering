@@ -1,6 +1,7 @@
 import numpy as np
 from numba import njit
 import matplotlib.pyplot as plt
+import pickle as pkl
 
 
 _NULL = 10000
@@ -46,32 +47,87 @@ def gen_wgraph(vert, surf):
     return wgraph
 
 
-def compute_geodesic(wgraph):
-    from collections import deque
-    
+def _get_adj(wgraph):
     N = len(wgraph)
-    dmat = np.ones([N, N]) * _NULL
+    amat = np.zeros((N, N))
+    for i in range(N):
+        for j in range(len(wgraph[i])):
+            id_ = wgraph[i][j][0]
+            amat[i, id_] = wgraph[i][j][1]
+    return amat
+
+
+@njit
+def _argmin_cond(arr, cond):
+    N = len(arr)
+    idx = np.arange(N)[cond]
+    return idx[np.argmin(arr[cond])]
+
+
+@njit
+def _dijstra(adj_mat):
+    N = len(adj_mat)
+    dmat = np.ones((N, N)) * _NULL
     
-    for id1 in range(N):
-        q = deque([(id1, 0)])
-        q.append((id1, 0))
+    for n in range(N):
+        prev = np.zeros(N)
+        dmat_s = np.ones(N) * _NULL
+        dmat_s[n] = 0
         
-        used = np.zeros(N, dtype=bool)
-        used[id1] = True
+        searching = np.ones(N, dtype=np.int8)
         
-        while q:
-            id2, d = q.popleft()
+        for _ in range(N):
+        # while np.any(searching == 1):
+            idx_s = _argmin_cond(dmat_s, searching==1)
+            searching[idx_s] = 0
             
-            if dmat[id1, id2] > d:
-                dmat[id1, id2] = d
-            
-            for i, w in wgraph[id2]:
-                if used[i]:
+            for i in range(N):
+                if adj_mat[idx_s, i] == 0:
                     continue
-                used[i] = True  
-                q.append((i, d+w))
                 
+                dnew = dmat_s[idx_s] + adj_mat[idx_s, i]
+                if dnew < dmat_s[i]:
+                    dmat_s[i] = dnew
+                    prev[i] = idx_s
+        
+        dmat[n] = dmat_s
+        
     return dmat
+
+
+def compute_geodesic(wgraph):
+    adj_mat = _get_adj(wgraph)
+    dmat = _dijstra(adj_mat)
+    dmat[dmat == _NULL] = -1
+    return dmat
+
+
+# def compute_geodesic(wgraph):
+#     from collections import deque
+    
+#     N = len(wgraph)
+#     dmat = np.ones([N, N]) * _NULL
+    
+#     for id1 in range(N):
+#         q = deque([(id1, 0)])
+#         q.append((id1, 0))
+        
+#         used = np.zeros(N, dtype=bool)
+#         used[id1] = True
+        
+#         while q:
+#             id2, d = q.popleft()
+            
+#             if dmat[id1, id2] > d:
+#                 dmat[id1, id2] = d
+            
+#             for i, w in wgraph[id2]:
+#                 if used[i]:
+#                     continue
+#                 used[i] = True  
+#                 q.append((i, d+w))
+                
+#     return dmat
 
 
 @njit
@@ -109,11 +165,11 @@ def burning(dmat):
     sample_id = 0
     min_null = _NULL
     for i in range(len(dmat)):
-        num_null = np.sum(dmat[i] == _NULL)
+        num_null = np.sum(dmat[i] == -1)
         if min_null < num_null:
             sample_id, min_null = i, num_null
     
-    id_large = dmat[sample_id] < _NULL
+    id_large = dmat[sample_id] > -1
     id_remove = np.where(~id_large)[0]
     dmat_burn = dmat[:, id_large][id_large]
     
@@ -122,22 +178,20 @@ def burning(dmat):
 
 def load_distance(prefix, fdir, print_warn=True):
     from os.path import join
-    from pickle import load
+    # from pickle import load
     
     prefix = prefix + ".pkl" if ".pkl" not in prefix else prefix    
     fname = join(fdir, prefix)
     
-    with open(fname, "rb") as fp:
-        geom = load(fp)
-        geom["removed"] = []
+    geom = _load_dobj(fname)
         
-        if np.any(geom["dm"] == _NULL):
-            dm, id_r = burning(geom["dm"])
-            geom["removed"] = id_r
-            geom["dm"] = dm
-            
-            if print_warn:
-                print("Disconnected components exist in %s, removed %d points, %d left"%(fname, len(id_r), len(dm)))
+    if np.any(geom["dm"] == _NULL):
+        dm, id_r = burning(geom["dm"])
+        geom["removed"] = id_r
+        geom["dm"] = dm
+        
+        if print_warn:
+            print("Disconnected components exist in %s, removed %d points, %d left"%(fname, len(id_r), len(dm)))
     
     return geom
         
@@ -147,13 +201,77 @@ def sample_dmat(dmat, nsample=200, start_id=0):
     return dmat[id_fps, :][:, id_fps], id_fps
 
 
-def load_pkl(fname):
-    from pickle import load
+def save_distance(fout, dobj):
+    
+    @njit
+    def extract_triu(dmat):
+        N = len(dmat)
+        L = N * (N-1) // 2
+        triu_flat = np.zeros(L)
+        
+        n = 0
+        for i in range(N):
+            for j in range(i+1, N):
+                triu_flat[n] = dmat[i, j]
+                n += 1
+                
+        return triu_flat
+        
+    
+    # convert distance matrix structure
+    dobj_c = dict(name=dobj["name"])
+    dobj_c["dm"] = extract_triu(dobj["dm"]).astype(np.float16)
+    
+    with open(fout, "wb") as fp:
+        pkl.dump(dobj_c, fp)
+    
+
+def _load_dobj(fname):
+    
+    # @njit
+    def _construct_full_matrix(triu_flat):
+        L = len(triu_flat)
+        N = _findN(L)
+        
+        dmat = np.zeros((N, N))
+        n = 0
+        for i in range(N):
+            for j in range(i+1, N):
+                dmat[i, j] = triu_flat[n]
+                dmat[j, i] = dmat[i, j]
+                n += 1
+        
+        return dmat
+        
+    
+    # @njit
+    def _findN(L):
+        N = 1
+        L *= 2
+        while N * (N-1) < L:
+            N += 1
+        
+        if N * (N-1) != L:
+            print("Check L = %d again"%(L))
+            N = -1
+        
+        return N
     
     with open(fname, "rb") as fp:
-        data = load(fp)
+        dobj = pkl.load(fp)
+        dmat = _construct_full_matrix(dobj["dm"].astype(np.float32))
+    
+    dobj["dm"] = dmat
+    return dobj
+
+
+# def load_pkl(fname):
+#     from pickle import load
+    
+#     with open(fname, "rb") as fp:
+#         data = load(fp)
         
-    return data
+#     return data
 
 
 def _read_obj_name(prefix):
